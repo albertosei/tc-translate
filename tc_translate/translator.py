@@ -1,5 +1,6 @@
 from googletrans import Translator as GoogleTranslator
 from .terminology_manager import TerminologyManager
+from .language_codes import convert_lang_code, is_google_supported
 from typing import Optional, Dict, Any
 import logging
 
@@ -14,7 +15,7 @@ class TCTranslator:
         
         Args:
             domain: Domain name (e.g., 'agric', 'science')
-            target_lang: Target language code (e.g., 'twi')
+            target_lang: Target language code (e.g., 'twi' or 'ak')
             src_lang: Source language code (default: 'en')
             terminologies_dir: Custom directory for terminology files
         """
@@ -25,16 +26,47 @@ class TCTranslator:
         # Initialize terminology manager
         self.terminology_manager = TerminologyManager(terminologies_dir)
         
+        # Convert language codes to Google format
+        self.src_lang_google = convert_lang_code(src_lang, to_google=True)
+        self.target_lang_google = self.terminology_manager.get_google_lang_code(target_lang)
+        
+        # Check if Google Translate supports these languages
+        if not is_google_supported(src_lang):
+            logger.warning(f"Source language '{src_lang}' may not be supported by Google Translate")
+        
+        if not is_google_supported(target_lang):
+            logger.warning(f"Target language '{target_lang}' may not be supported by Google Translate")
+        
         # Initialize Google Translate
         self.google_translator = GoogleTranslator()
         
         # Verify domain and language are available
         available = self.terminology_manager.get_available_domains_languages()
-        if (domain, target_lang) not in available:
+        
+        # Check if the requested domain/language combination exists
+        domain_lang_exists = False
+        original_target_lang = None
+        
+        for d, l in available:
+            if d == domain:
+                # Check if target_lang matches either original or Google code
+                google_l = convert_lang_code(l, to_google=True)
+                if target_lang == l or target_lang == google_l:
+                    domain_lang_exists = True
+                    original_target_lang = l
+                    break
+        
+        if not domain_lang_exists:
+            # Find what's actually available
+            available_for_domain = [l for d, l in available if d == domain]
             raise ValueError(
-                f"Domain '{domain}' with language '{target_lang}' not found. "
-                f"Available: {available}"
+                f"Domain '{domain}' with language '{target_lang}' not found.\n"
+                f"Available languages for '{domain}': {available_for_domain}\n"
+                f"Note: You can use either 2-letter (Google) or 3-letter codes"
             )
+        
+        # Store the original language code from terminology file
+        self.original_target_lang = original_target_lang
     
     def translate(self, text: str, **kwargs) -> Dict[str, Any]:
         """
@@ -48,19 +80,22 @@ class TCTranslator:
             Dictionary with translation results
         """
         # Step 1: Preprocess - replace terms with IDs
+        # Use the original language code from terminology file
         preprocessed_text, replacements = self.terminology_manager.preprocess_text(
-            text, self.domain, self.target_lang
+            text, self.domain, self.original_target_lang
         )
         
-        logger.info(f"Preprocessed text: {preprocessed_text}")
-        logger.info(f"Replacements: {list(replacements.keys())}")
+        logger.debug(f"Preprocessed text: {preprocessed_text}")
+        logger.debug(f"Replacements: {list(replacements.keys())}")
+        logger.debug(f"Source language (Google): {self.src_lang_google}")
+        logger.debug(f"Target language (Google): {self.target_lang_google}")
         
         # Step 2: Translate with Google Translate
         try:
             google_result = self.google_translator.translate(
                 preprocessed_text,
-                src=self.src_lang,
-                dest=self.target_lang,
+                src=self.src_lang_google,
+                dest=self.target_lang_google,
                 **kwargs
             )
             
@@ -76,11 +111,14 @@ class TCTranslator:
                 'text': final_text,
                 'src': self.src_lang,
                 'dest': self.target_lang,
+                'original_dest': self.original_target_lang,
                 'domain': self.domain,
                 'original': text,
                 'preprocessed': preprocessed_text,
                 'google_translation': google_result.text,
-                'replacements_count': len(replacements)
+                'replacements_count': len(replacements),
+                'src_google': self.src_lang_google,
+                'dest_google': self.target_lang_google
             }
             
         except Exception as e:
@@ -98,6 +136,7 @@ class Translator:
     def __init__(self, terminologies_dir: str = None):
         self.terminology_manager = TerminologyManager(terminologies_dir)
         self.google_translator = GoogleTranslator()
+        self.terminologies_dir = terminologies_dir
     
     def translate(self, text: str, src: str = 'en', dest: str = 'twi', 
                   domain: Optional[str] = None, **kwargs) -> Dict[str, Any]:
@@ -106,8 +145,8 @@ class Translator:
         
         Args:
             text: Text to translate
-            src: Source language
-            dest: Destination language
+            src: Source language (2-letter or 3-letter)
+            dest: Destination language (2-letter or 3-letter)
             domain: Domain for terminology control (optional)
             **kwargs: Additional arguments
             
@@ -120,16 +159,27 @@ class Translator:
                 domain=domain,
                 target_lang=dest,
                 src_lang=src,
-                terminologies_dir=self.terminology_manager.terminologies_dir
+                terminologies_dir=self.terminologies_dir
             )
             return tc_translator.translate(text, **kwargs)
         else:
             # Use regular Google Translate
-            result = self.google_translator.translate(text, src=src, dest=dest, **kwargs)
+            # Convert language codes to Google format
+            src_google = convert_lang_code(src, to_google=True)
+            dest_google = convert_lang_code(dest, to_google=True)
+            
+            result = self.google_translator.translate(
+                text, 
+                src=src_google, 
+                dest=dest_google, 
+                **kwargs
+            )
             return {
                 'text': result.text,
                 'src': src,
                 'dest': dest,
+                'src_google': src_google,
+                'dest_google': dest_google,
                 'original': text
             }
     
