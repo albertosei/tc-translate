@@ -1,8 +1,10 @@
-from googletrans import Translator as GoogleTranslator
+import asyncio
+import logging
+from typing import Optional, Dict, Any
+
+from googletrans import AsyncTranslator as GoogleTranslator
 from .terminology_manager import TerminologyManager
 from .language_codes import convert_lang_code, is_google_supported
-from typing import Optional, Dict, Any
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,9 +39,6 @@ class TCTranslator:
         if not is_google_supported(target_lang):
             logger.warning(f"Target language '{target_lang}' may not be supported by Google Translate")
         
-        # Initialize Google Translate
-        self.google_translator = GoogleTranslator()
-        
         # Verify domain and language are available
         available = self.terminology_manager.get_available_domains_languages()
         
@@ -68,7 +67,7 @@ class TCTranslator:
         # Store the original language code from terminology file
         self.original_target_lang = original_target_lang
     
-    def translate(self, text: str, **kwargs) -> Dict[str, Any]:
+    async def translate(self, text: str, **kwargs) -> Dict[str, Any]:
         """
         Translate text with terminology control.
         
@@ -90,44 +89,62 @@ class TCTranslator:
         logger.debug(f"Source language (Google): {self.src_lang_google}")
         logger.debug(f"Target language (Google): {self.target_lang_google}")
         
-        # Step 2: Translate with Google Translate
+        # Step 2: Translate with Google Translate (async)
         try:
-            google_result = self.google_translator.translate(
-                preprocessed_text,
-                src=self.src_lang_google,
-                dest=self.target_lang_google,
-                **kwargs
-            )
-            
-            translated_with_placeholders = google_result.text
-            
-            # Step 3: Postprocess - replace IDs with translations
-            final_text = self.terminology_manager.postprocess_text(
-                translated_with_placeholders,
-                replacements
-            )
-            
-            return {
-                'text': final_text,
-                'src': self.src_lang,
-                'dest': self.target_lang,
-                'original_dest': self.original_target_lang,
-                'domain': self.domain,
-                'original': text,
-                'preprocessed': preprocessed_text,
-                'google_translation': google_result.text,
-                'replacements_count': len(replacements),
-                'src_google': self.src_lang_google,
-                'dest_google': self.target_lang_google
-            }
-            
+            async with GoogleTranslator() as translator:
+                google_result = await translator.translate(
+                    preprocessed_text,
+                    src=self.src_lang_google,
+                    dest=self.target_lang_google,
+                    **kwargs
+                )
+                
+                translated_with_placeholders = google_result.text
+                
+                # Step 3: Postprocess - replace IDs with translations
+                final_text = self.terminology_manager.postprocess_text(
+                    translated_with_placeholders,
+                    replacements
+                )
+                
+                return {
+                    'text': final_text,
+                    'src': self.src_lang,
+                    'dest': self.target_lang,
+                    'original_dest': self.original_target_lang,
+                    'domain': self.domain,
+                    'original': text,
+                    'preprocessed': preprocessed_text,
+                    'google_translation': google_result.text,
+                    'replacements_count': len(replacements),
+                    'src_google': self.src_lang_google,
+                    'dest_google': self.target_lang_google
+                }
+                
         except Exception as e:
             logger.error(f"Translation failed: {e}")
             raise
     
-    def batch_translate(self, texts: list, **kwargs) -> list:
-        """Translate multiple texts."""
-        return [self.translate(text, **kwargs) for text in texts]
+    def translate_sync(self, text: str, **kwargs) -> Dict[str, Any]:
+        """
+        Synchronous wrapper for translate.
+        
+        Args:
+            text: Text to translate
+            **kwargs: Additional arguments for Google Translate
+            
+        Returns:
+            Dictionary with translation results
+        """
+        return asyncio.run(self.translate(text, **kwargs))
+    
+    async def batch_translate(self, texts: list, **kwargs) -> list:
+        """Translate multiple texts asynchronously."""
+        return [await self.translate(text, **kwargs) for text in texts]
+    
+    def batch_translate_sync(self, texts: list, **kwargs) -> list:
+        """Synchronous wrapper for batch translation."""
+        return asyncio.run(self.batch_translate(texts, **kwargs))
 
 # Google Translate-like API wrapper
 class Translator:
@@ -135,11 +152,10 @@ class Translator:
     
     def __init__(self, terminologies_dir: str = None):
         self.terminology_manager = TerminologyManager(terminologies_dir)
-        self.google_translator = GoogleTranslator()
         self.terminologies_dir = terminologies_dir
     
-    def translate(self, text: str, src: str = 'en', dest: str = 'twi', 
-                  domain: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+    async def translate(self, text: str, src: str = 'en', dest: str = 'twi', 
+                       domain: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """
         Translate text with optional terminology control.
         
@@ -161,28 +177,50 @@ class Translator:
                 src_lang=src,
                 terminologies_dir=self.terminologies_dir
             )
-            return tc_translator.translate(text, **kwargs)
+            return await tc_translator.translate(text, **kwargs)
         else:
-            # Use regular Google Translate
-            # Convert language codes to Google format
-            src_google = convert_lang_code(src, to_google=True)
-            dest_google = convert_lang_code(dest, to_google=True)
-            
-            result = self.google_translator.translate(
-                text, 
-                src=src_google, 
-                dest=dest_google, 
-                **kwargs
-            )
-            return {
-                'text': result.text,
-                'src': src,
-                'dest': dest,
-                'src_google': src_google,
-                'dest_google': dest_google,
-                'original': text
-            }
+            # Use regular Google Translate (async)
+            async with GoogleTranslator() as translator:
+                src_google = convert_lang_code(src, to_google=True)
+                dest_google = convert_lang_code(dest, to_google=True)
+                
+                result = await translator.translate(
+                    text, 
+                    src=src_google, 
+                    dest=dest_google, 
+                    **kwargs
+                )
+                return {
+                    'text': result.text,
+                    'src': src,
+                    'dest': dest,
+                    'src_google': src_google,
+                    'dest_google': dest_google,
+                    'original': text
+                }
     
-    def detect(self, text: str):
+    def translate_sync(self, text: str, src: str = 'en', dest: str = 'twi', 
+                      domain: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Synchronous wrapper for translate.
+        
+        Args:
+            text: Text to translate
+            src: Source language (2-letter or 3-letter)
+            dest: Destination language (2-letter or 3-letter)
+            domain: Domain for terminology control (optional)
+            **kwargs: Additional arguments
+            
+        Returns:
+            Dictionary with translation results
+        """
+        return asyncio.run(self.translate(text, src, dest, domain, **kwargs))
+    
+    async def detect(self, text: str):
         """Detect language of text."""
-        return self.google_translator.detect(text)
+        async with GoogleTranslator() as translator:
+            return await translator.detect(text)
+    
+    def detect_sync(self, text: str):
+        """Synchronous wrapper for detect."""
+        return asyncio.run(self.detect(text))
